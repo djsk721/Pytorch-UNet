@@ -88,7 +88,11 @@ def train_model(
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, true_masks = batch['image'], batch['mask']
-
+                print("images : ", images)
+                print("images.shape : ", images.shape)
+                print("true_masks : ", true_masks)
+                print("true_masks.shape : ", true_masks.shape)
+                print("model.n_channels: ", model.n_channels)
                 assert images.shape[1] == model.n_channels, \
                     f'Network has been defined with {model.n_channels} input channels, ' \
                     f'but loaded images have {images.shape[1]} channels. Please check that ' \
