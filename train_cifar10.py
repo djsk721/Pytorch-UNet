@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 import wandb
-from evaluate import evaluate
+from evaluate_cifar10 import evaluate
 from unet import UNet
 from utils.load_cifar10 import make_cifar10
 from utils.utils import add_gaussian_noise 
@@ -62,24 +62,24 @@ def train_model(
     n_train = len(train_set)
     # train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
-    # # (Initialize logging)
-    # experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
-    # experiment.config.update(
-    #     dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
-    #          val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
-    # )
+    # (Initialize logging)
+    experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
+    experiment.config.update(
+        dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
+             val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
+    )
 
-    # logging.info(f'''Starting training:
-    #     Epochs:          {epochs}
-    #     Batch size:      {batch_size}
-    #     Learning rate:   {learning_rate}
-    #     Training size:   {n_train}
-    #     Validation size: {n_val}
-    #     Checkpoints:     {save_checkpoint}
-    #     Device:          {device.type}
-    #     Images scaling:  {img_scale}
-    #     Mixed Precision: {amp}
-    # ''')
+    logging.info(f'''Starting training:
+        Epochs:          {epochs}
+        Batch size:      {batch_size}
+        Learning rate:   {learning_rate}
+        Training size:   {n_train}
+        Validation size: {n_val}
+        Checkpoints:     {save_checkpoint}
+        Device:          {device.type}
+        Images scaling:  {img_scale}
+        Mixed Precision: {amp}
+    ''')
 
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     optimizer = optim.Adam(model.parameters(),
@@ -95,36 +95,37 @@ def train_model(
         epoch_loss = 0
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
-                images, noisy_images = batch[0], torch.stack([add_gaussian_noise(image) for image in batch[0]], dim=0)
+                images, noisy_images = batch[0], add_gaussian_noise(batch[0], 0.05)
                 # 3 channel
                 # images, true_masks = batch['image'], batch['mask']
-                print("images.shape : ", images.shape)
-                print("noisy_images.shape : ", noisy_images.shape)
-                print("images.shape[1] : ", noisy_images.shape[1])
-                print("model.n_channels: ", model.n_channels)
+                # print("images : ", images)
+                # print("images.shape : ", images.shape)
+                # print("noisy_images : ", noisy_images)
+                # print("noisy_images.shape : ", noisy_images.shape)
+                # print("model.n_channels: ", model.n_channels)
                 assert noisy_images.shape[1] == model.n_channels, \
                     f'Network has been defined with {model.n_channels} input channels, ' \
                     f'but loaded images have {noisy_images.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
 
                 noisy_images = noisy_images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
-                images = images.to(device=device, dtype=torch.long)
+                images = images.to(device=device, dtype=torch.float32)
 
                 out = model(noisy_images)
-                print("out.shape : ", out.shape)
+                # print("out.shape : ", out.shape)
                 loss = criterion(out, images)
-                # with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                #     masks_pred = model(noisy_images)
-                #     if model.n_classes == 1:
-                #         loss = criterion(masks_pred.squeeze(1), images.float())
-                #         loss += dice_loss(F.sigmoid(masks_pred.squeeze(1)), images.float(), multiclass=False)
-                #     else:
-                #         loss = criterion(masks_pred, images)
-                #         loss += dice_loss(
-                #             F.softmax(masks_pred, dim=1).float(),
-                #             F.one_hot(images, model.n_classes).permute(0, 3, 1, 2).float(),
-                #             multiclass=True
-                #         )
+                with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
+                    image_pred = model(noisy_images)
+                    if model.n_classes == 1:
+                        loss = criterion(image_pred.squeeze(1), images.float())
+                        loss += dice_loss(F.sigmoid(image_pred.squeeze(1)), images.float(), multiclass=False)
+                    else:
+                        loss = criterion(image_pred, images)
+                        # loss += dice_loss(
+                        #     F.softmax(image_pred, dim=1).float(),
+                        #     F.one_hot(images, model.n_classes).permute(0, 3, 1, 2).float(),
+                        #     multiclass=True
+                        # )
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -135,11 +136,11 @@ def train_model(
                 pbar.update(noisy_images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
-                # experiment.log({
-                #     'train loss': loss.item(),
-                #     'step': global_step,
-                #     'epoch': epoch
-                # })
+                experiment.log({
+                    'train loss': loss.item(),
+                    'step': global_step,
+                    'epoch': epoch
+                })
                 pbar.set_postfix(**{'loss (batch)': loss.item()})
 
                 # Evaluation round
@@ -157,22 +158,22 @@ def train_model(
                         val_score = evaluate(model, val_loader, device, amp)
                         scheduler.step(val_score)
 
-                        logging.info('Validation Dice score: {}'.format(val_score))
-                        # try:
-                        #     experiment.log({
-                        #         'learning rate': optimizer.param_groups[0]['lr'],
-                        #         'validation Dice': val_score,
-                        #         'images': wandb.Image(images[0].cpu()),
-                        #         'masks': {
-                        #             'true': wandb.Image(true_masks[0].float().cpu()),
-                        #             'pred': wandb.Image(masks_pred.argmax(dim=1)[0].float().cpu()),
-                        #         },
-                        #         'step': global_step,
-                        #         'epoch': epoch,
-                        #         **histograms
-                        #     })
-                        # except:
-                        #     pass
+                        logging.info('Validation PSNR score: {}'.format(val_score))
+                        try:
+                            experiment.log({
+                                'learning rate': optimizer.param_groups[0]['lr'],
+                                'Validation PSNR': val_score,
+                                'images': wandb.Image(noisy_images.cpu()),
+                                'masks': {
+                                    'true': wandb.Image(images.float().cpu()),
+                                    'pred': wandb.Image(image_pred.float().cpu()),
+                                },
+                                'step': global_step,
+                                'epoch': epoch,
+                                **histograms
+                            })
+                        except:
+                            pass
 
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
@@ -210,7 +211,7 @@ if __name__ == '__main__':
     # Change here to adapt to your data
     # n_channels=3 for RGB images
     # n_classes is the number of probabilities you want to get per pixel
-    model = UNet(n_channels=1, n_classes=args.classes, bilinear=args.bilinear)
+    model = UNet(n_channels=3, n_classes=args.classes, bilinear=args.bilinear)
     model = model.to(memory_format=torch.channels_last)
 
     logging.info(f'Network:\n'
@@ -225,44 +226,32 @@ if __name__ == '__main__':
         logging.info(f'Model loaded from {args.load}')
 
     model.to(device=device)
-    print("device : ", device)
-    train_model(
-    model=model,
-    epochs=args.epochs,
-    batch_size=args.batch_size,
-    learning_rate=args.lr,
-    device=device,
-    img_scale=args.scale,
-    val_percent=args.val / 100,
-    # amp=args.amp,
-    dir_checkpoint=args.dir_checkpoint
-)
-    # try:
-    #     train_model(
-    #         model=model,
-    #         epochs=args.epochs,
-    #         batch_size=args.batch_size,
-    #         learning_rate=args.lr,
-    #         device=device,
-    #         img_scale=args.scale,
-    #         val_percent=args.val / 100,
-    #         # amp=args.amp,
-    #         dir_checkpoint=args.dir_checkpoint
-    #     )
-    # except torch.cuda.OutOfMemoryError:
-    #     logging.error('Detected OutOfMemoryError! '
-    #                   'Enabling checkpointing to reduce memory usage, but this slows down training. '
-    #                   'Consider enabling AMP (--amp) for fast and memory efficient training')
-    #     torch.cuda.empty_cache()
-    #     model.use_checkpointing()
-    #     train_model(
-    #         model=model,
-    #         epochs=args.epochs,
-    #         batch_size=args.batch_size,
-    #         learning_rate=args.lr,
-    #         device=device,
-    #         img_scale=args.scale,
-    #         val_percent=args.val / 100,
-    #         amp=args.amp,
-    #         dir_checkpoint=args.dir_checkpoint
-    #     )
+    try:
+        train_model(
+            model=model,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr,
+            device=device,
+            img_scale=args.scale,
+            val_percent=args.val / 100,
+            # amp=args.amp,
+            dir_checkpoint=args.dir_checkpoint
+        )
+    except torch.cuda.OutOfMemoryError:
+        logging.error('Detected OutOfMemoryError! '
+                      'Enabling checkpointing to reduce memory usage, but this slows down training. '
+                      'Consider enabling AMP (--amp) for fast and memory efficient training')
+        torch.cuda.empty_cache()
+        model.use_checkpointing()
+        train_model(
+            model=model,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.lr,
+            device=device,
+            img_scale=args.scale,
+            val_percent=args.val / 100,
+            amp=args.amp,
+            dir_checkpoint=args.dir_checkpoint
+        )
