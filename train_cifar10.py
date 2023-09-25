@@ -50,17 +50,12 @@ def train_model(
 
     # 2. Split into train / validation partitions
     n_val = len(val_set)
-    n_train = len(train_set) - n_val
+    n_train = len(train_set)
 
     # 3. Create data loaders
     loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
-    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
+    train_loader = DataLoader(train_set, shuffle=False, **loader_args)
     val_loader = DataLoader(val_set, shuffle=False, drop_last=True, **loader_args)
-
-    # 2. Split into train / validation partitions
-    n_val = len(val_set)
-    n_train = len(train_set)
-    # train_set, val_set = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
 
     # (Initialize logging)
     experiment = wandb.init(project='U-Net', resume='allow', anonymous='must')
@@ -68,6 +63,15 @@ def train_model(
         dict(epochs=epochs, batch_size=batch_size, learning_rate=learning_rate,
              val_percent=val_percent, save_checkpoint=save_checkpoint, img_scale=img_scale, amp=amp)
     )
+
+
+    # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
+    optimizer = optim.Adam(model.parameters(),
+                              lr=learning_rate, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
+    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
+    criterion = nn.MSELoss()
+    global_step = 0
 
     logging.info(f'''Starting training:
         Epochs:          {epochs}
@@ -79,16 +83,8 @@ def train_model(
         Device:          {device.type}
         Images scaling:  {img_scale}
         Mixed Precision: {amp}
+        optimizer:       {optimizer}
     ''')
-
-    # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
-    optimizer = optim.Adam(model.parameters(),
-                              lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
-    grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
-    criterion = nn.MSELoss()
-    global_step = 0
-
     # 5. Begin training
     for epoch in range(1, epochs + 1):
         model.train()
@@ -116,16 +112,7 @@ def train_model(
                 loss = criterion(out, images)
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     image_pred = model(noisy_images)
-                    if model.n_classes == 1:
-                        loss = criterion(image_pred.squeeze(1), images.float())
-                        loss += dice_loss(F.sigmoid(image_pred.squeeze(1)), images.float(), multiclass=False)
-                    else:
-                        loss = criterion(image_pred, images)
-                        # loss += dice_loss(
-                        #     F.softmax(image_pred, dim=1).float(),
-                        #     F.one_hot(images, model.n_classes).permute(0, 3, 1, 2).float(),
-                        #     multiclass=True
-                        # )
+                    loss = criterion(image_pred, images)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -173,21 +160,22 @@ def train_model(
                                 **histograms
                             })
                         except:
+                            logging.info('error of logging to wandb!!')                            
                             pass
-
+        experiment.finish()
         if save_checkpoint:
             Path(dir_checkpoint).mkdir(parents=True, exist_ok=True)
             state_dict = model.state_dict()
             # state_dict['mask_values'] = dataset.mask_values
-            torch.save(state_dict, str(dir_checkpoint / 'checkpoint_epoch{}.pth'.format(epoch)))
+            torch.save(state_dict, str(Path(dir_checkpoint) / 'checkpoint_epoch{}.pth'.format(epoch)))
             logging.info(f'Checkpoint {epoch} saved!')
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Train the UNet on images and target masks')
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
+    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=1, help='Number of epochs')
     parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=1, help='Batch size')
-    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-5,
+    parser.add_argument('--learning-rate', '-l', metavar='LR', type=float, default=1e-3,
                         help='Learning rate', dest='lr')
     parser.add_argument('--load', '-f', type=str, default=False, help='Load model from a .pth file')
     parser.add_argument('--scale', '-s', type=float, default=0.5, help='Downscaling factor of the images')
@@ -195,7 +183,7 @@ def get_args():
                         help='Percent of the data that is used as validation (0-100)')
     parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
     parser.add_argument('--bilinear', action='store_true', default=False, help='Use bilinear upsampling')
-    parser.add_argument('--classes', '-c', type=int, default=2, help='Number of classes')
+    parser.add_argument('--classes', '-c', type=int, default=3, help='Number of classes')
     parser.add_argument('--dir', '-d', dest='dir_checkpoint', type=str, default="outputs", help='saving model directory')
 
     return parser.parse_args()
