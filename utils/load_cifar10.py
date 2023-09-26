@@ -4,6 +4,7 @@ import torchvision.transforms as transforms
 
 
 def make_cifar10(batch_size):
+    torch.manual_seed(42)
     transform = transforms.Compose(
         [transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])

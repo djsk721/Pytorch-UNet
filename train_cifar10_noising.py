@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 import wandb
-from evaluate_cifar10 import evaluate
+from evaluate_cifar10 import evaluate_noising
 from unet import UNet
 from utils.load_cifar10 import make_cifar10
 from utils.utils import add_gaussian_noise, add_poisson_noise, add_salt_pepper_noise
@@ -93,18 +93,18 @@ def train_model(
         with tqdm(total=n_train, desc=f'Epoch {epoch}/{epochs}', unit='img') as pbar:
             for batch in train_loader:
                 images, noisy_images = batch[0], noise_func(batch[0].cpu().numpy())
-                noisy_images = noisy_images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
-                images = images.to(device=device, dtype=torch.float32)
+                images = images.to(device=device, dtype=torch.float32, memory_format=torch.channels_last)
+                noisy_images = noisy_images.to(device=device, dtype=torch.float32)
 
                 # 3 channel
-                assert noisy_images.shape[1] == model.n_channels, \
+                assert images.shape[1] == model.n_channels, \
                     f'Network has been defined with {model.n_channels} input channels, ' \
-                    f'but loaded images have {noisy_images.shape[1]} channels. Please check that ' \
+                    f'but loaded images have {images.shape[1]} channels. Please check that ' \
                     'the images are loaded correctly.'
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
-                    image_pred = model(noisy_images)
-                    loss = criterion(image_pred, images)
+                    image_pred = model(images)
+                    loss = criterion(image_pred, noisy_images)
 
                 optimizer.zero_grad(set_to_none=True)
                 grad_scaler.scale(loss).backward()
@@ -112,7 +112,7 @@ def train_model(
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
 
-                pbar.update(noisy_images.shape[0])
+                pbar.update(images.shape[0])
                 global_step += 1
                 epoch_loss += loss.item()
                 experiment.log({
@@ -134,7 +134,7 @@ def train_model(
                             if not (torch.isinf(value.grad) | torch.isnan(value.grad)).any():
                                 histograms['Gradients/' + tag] = wandb.Histogram(value.grad.data.cpu())
 
-                        val_score = evaluate(model, val_loader, device, amp, noise_func)
+                        val_score = evaluate_noising(model, val_loader, device, amp, noise_func)
                         psnr_score.append(val_score)
                         scheduler.step(val_score)
 
@@ -143,9 +143,9 @@ def train_model(
                             experiment.log({
                                 'learning rate': optimizer.param_groups[0]['lr'],
                                 'Validation PSNR': val_score,
-                                'images': wandb.Image(noisy_images.cpu()),
+                                'images': wandb.Image(images.cpu()),
                                 'masks': {
-                                    'true': wandb.Image(images.float().cpu()),
+                                    'true': wandb.Image(noisy_images.float().cpu()),
                                     'pred': wandb.Image(image_pred.float().cpu()),
                                 },
                                 'step': global_step,
