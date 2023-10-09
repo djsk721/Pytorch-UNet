@@ -57,10 +57,10 @@ def train_model(
     # 4. Set up the optimizer, the loss, the learning rate scheduler and the loss scaling for AMP
     # optimizer = optim.SGD(model.parameters(), momentum=0.9,
     #                         lr=learning_rate, weight_decay=weight_decay)
-    # optimizer = optim.RMSprop(model.parameters(),
-    #                           lr=learning_rate, weight_decay=weight_decay)
-    optimizer = optim.Adam(model.parameters(),
+    optimizer = optim.RMSprop(model.parameters(),
                               lr=learning_rate, weight_decay=weight_decay)
+    # optimizer = optim.Adam(model.parameters(),
+    #                           lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=5)  # goal: maximize Dice score
     grad_scaler = torch.cuda.amp.GradScaler(enabled=amp)
     criterion = nn.MSELoss()
